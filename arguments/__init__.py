@@ -54,7 +54,7 @@ class ModelParams(ParamGroup):
         self._resolution = -1
         self._white_background = False
         self.data_device = "cuda"
-        self.eval = False
+        self.eval = True
         #endogaussian
         self.render_process=False
         self.extra_mark=None

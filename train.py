@@ -45,7 +45,27 @@ import lpips
 import cv2
 
 def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, extra_mark):
-    first_iter = 0
+
+    # print("=== Dataset Attributes ===")
+    # for k, v in vars(dataset).items():
+    #     print(f"{k}: {v}")
+
+    # print("=== Hyper Parameters (ModelHiddenParams) ===")
+    # for k, v in vars(hyper).items():
+    #     print(f"{k}: {v}")
+
+    # print("=== Optimization Parameters (opt) ===")
+    # for k, v in vars(opt).items():
+    #     print(f"{k}: {v}")
+
+    # print("=== Pipeline Parameters (pipe) ===")
+    # for k, v in vars(pipe).items():
+    #     print(f"{k}: {v}")
+
+    # print("=== Additional Args ===")
+    # for k, v in vars(args).items():
+    #     print(f"{k}: {v}")
+
     tb_writer = prepare_output_and_logger(expname)
     gaussians = GaussianModel(dataset, dataset.sh_degree, hyper)
     dataset.model_path = args.model_path
