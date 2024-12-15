@@ -18,8 +18,13 @@ from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
+from scene.deformation import deform_network
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from arguments import ModelParams
+#EndoGaussian
+from scene.regulation import compute_plane_smoothness
+
 
 class GaussianModel:
 
@@ -40,8 +45,10 @@ class GaussianModel:
 
         self.rotation_activation = torch.nn.functional.normalize
 
+#add modelparam args and hyper
+    def __init__(self, args : ModelParams, sh_degree : int, hyper):
+        self.device = args.data_device
 
-    def __init__(self, sh_degree : int):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0)
@@ -59,8 +66,16 @@ class GaussianModel:
         self.setup_functions()
         self._semantic_feature = torch.empty(0) 
 
+        #endogaussian
+        self._deformation = deform_network(hyper)
+        self._deformation_table = torch.empty(0)
+
     def capture(self):
         return (
+            #endogaussian
+            self._deformation.state_dict(),
+            self._deformation_table,
+            self.percent_dense,
             self.active_sh_degree,
             self._xyz,
             self._features_dc,
@@ -79,6 +94,8 @@ class GaussianModel:
     def restore(self, model_args, training_args):
         (self.active_sh_degree, 
         self._xyz, 
+        self._deformation_table,
+        self._deformation,
         self._features_dc, 
         self._features_rest,
         self._scaling, 
@@ -132,31 +149,45 @@ class GaussianModel:
 
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, semantic_feature_size : int, speedup: bool):
         self.spatial_lr_scale = spatial_lr_scale
-        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
-        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
-        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        # fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+        # fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+        # features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().to(self.device)
+        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().to(self.device))
+        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().to(self.device)
         features[:, :3, 0 ] = fused_color
         features[:, 3:, 1:] = 0.0
         
         if speedup: # speed up for Segmentation
             semantic_feature_size = int(semantic_feature_size/2)
-        self._semantic_feature = torch.zeros(fused_point_cloud.shape[0], semantic_feature_size, 1).float().cuda() 
+        # self._semantic_feature = torch.zeros(fused_point_cloud.shape[0], semantic_feature_size, 1).float().cuda() \
+        self._semantic_feature = torch.zeros(fused_point_cloud.shape[0], semantic_feature_size, 1).float().to(self.device)
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
-        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+        # dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().to(self.device)), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        # rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
         rots[:, 0] = 1
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+
+        #endogaussian
+        self._deformation = self._deformation.to(self.device) 
+
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        # self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
+#endogaussian
+        self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device=self.device),0)
+
         self._semantic_feature = nn.Parameter(self._semantic_feature.transpose(1, 2).contiguous().requires_grad_(True))
         
 
@@ -164,6 +195,9 @@ class GaussianModel:
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+        #EndoGaussian
+        self._deformation_accum = torch.zeros((self.get_xyz.shape[0],3),device="cuda")
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
@@ -173,6 +207,9 @@ class GaussianModel:
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
             {'params': [self._semantic_feature], 'lr':training_args.semantic_feature_lr, "name": "semantic_feature"},
+#endogaussian
+            {'params': list(self._deformation.get_mlp_parameters()), 'lr': training_args.deformation_lr_init * self.spatial_lr_scale, "name": "deformation"},
+            {'params': list(self._deformation.get_grid_parameters()), 'lr': training_args.grid_lr_init * self.spatial_lr_scale, "name": "grid"},
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -180,6 +217,15 @@ class GaussianModel:
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
+        #EndoGaussian
+        self.deformation_scheduler_args = get_expon_lr_func(lr_init=training_args.deformation_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.deformation_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.deformation_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps) 
+        self.grid_scheduler_args = get_expon_lr_func(lr_init=training_args.grid_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.grid_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.deformation_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps) 
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -188,6 +234,15 @@ class GaussianModel:
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
                 return lr
+                    #EndoGaussian
+            if  "grid" in param_group["name"]:
+                lr = self.grid_scheduler_args(iteration)
+                param_group['lr'] = lr
+                # return lr
+            elif param_group["name"] == "deformation":
+                lr = self.deformation_scheduler_args(iteration)
+                param_group['lr'] = lr
+                # return lr
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
@@ -206,6 +261,40 @@ class GaussianModel:
         for i in range(self._semantic_feature.shape[1]*self._semantic_feature.shape[2]):  
             l.append('semantic_{}'.format(i))
         return l
+    
+#EndoGaussian
+    def compute_deformation(self,time):    
+        deform = self._deformation[:,:,:time].sum(dim=-1)
+        xyz = self._xyz + deform
+        return xyz
+        
+#EndoGaussian
+    def load_model(self, path):
+        print("loading model from exists{}".format(path))
+        
+        weight_dict = torch.load(os.path.join(path,"deformation.pth"),map_location="cuda")
+
+#deformation state dict not matching for some reason
+
+        self._deformation.load_state_dict(weight_dict)
+        self._deformation = self._deformation.to("cuda")
+        
+        self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
+        if os.path.exists(os.path.join(path, "deformation_table.pth")):
+            self._deformation_table = torch.load(os.path.join(path, "deformation_table.pth"),map_location="cuda")
+            
+        self._deformation_accum = torch.zeros((self.get_xyz.shape[0],3),device="cuda")
+        if os.path.exists(os.path.join(path, "deformation_accum.pth")):
+            self._deformation_accum = torch.load(os.path.join(path, "deformation_accum.pth"),map_location="cuda")
+        
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+#endoguasian
+    def save_deformation(self, path):
+        torch.save(self._deformation.state_dict(),os.path.join(path, "deformation.pth"))
+        torch.save(self._deformation_table,os.path.join(path, "deformation_table.pth"))
+        torch.save(self._deformation_accum,os.path.join(path, "deformation_accum.pth"))
+    
 
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
@@ -247,8 +336,10 @@ class GaussianModel:
         features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
 
         count = sum(1 for name in plydata.elements[0].data.dtype.names if name.startswith("semantic_"))
-        semantic_feature = np.stack([np.asarray(plydata.elements[0][f"semantic_{i}"]) for i in range(count)], axis=1) 
-        semantic_feature = np.expand_dims(semantic_feature, axis=-1) 
+
+        #disable semantic features
+        # semantic_feature = np.stack([np.asarray(plydata.elements[0][f"semantic_{i}"]) for i in range(count)], axis=1) 
+        # semantic_feature = np.expand_dims(semantic_feature, axis=-1) 
 
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
         extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
@@ -277,7 +368,11 @@ class GaussianModel:
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._semantic_feature = nn.Parameter(torch.tensor(semantic_feature, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+       
+        # disable semantic features for endogaussian
+       
+        # self._semantic_feature = nn.Parameter(torch.tensor(semantic_feature, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+       
         self.active_sh_degree = self.max_sh_degree
 
 
@@ -300,6 +395,9 @@ class GaussianModel:
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
+            #endogaussian condintional 
+            if len(group["params"]) > 1:
+                continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
                 stored_state["exp_avg"] = stored_state["exp_avg"][mask]
@@ -327,6 +425,10 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
         self._semantic_feature = optimizable_tensors["semantic_feature"]
 
+        #EndoGaussian 
+        self._deformation_accum = self._deformation_accum[valid_points_mask]
+        self._deformation_table = self._deformation_table[valid_points_mask]
+
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
         self.denom = self.denom[valid_points_mask]
@@ -335,7 +437,11 @@ class GaussianModel:
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            assert len(group["params"]) == 1
+            #feature3dgs
+            # assert len(group["params"]) == 1
+            #endogaussian
+            if len(group["params"])>1:
+                continue
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
@@ -354,7 +460,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_semantic_feature):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_semantic_feature, new_deformation_table):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -371,8 +477,13 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._semantic_feature = optimizable_tensors["semantic_feature"] 
+#endo
+        self._deformation_table = torch.cat([self._deformation_table,new_deformation_table],-1)
+
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+#endo        
+        self._deformation_accum = torch.zeros((self.get_xyz.shape[0], 3), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
@@ -397,7 +508,10 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_semantic_feature = self._semantic_feature[selected_pts_mask].repeat(N,1,1) 
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_semantic_feature) 
+                #EndoGaussian
+        new_deformation_table = self._deformation_table[selected_pts_mask].repeat(N)
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_semantic_feature,new_deformation_table) 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
@@ -415,7 +529,29 @@ class GaussianModel:
         new_rotation = self._rotation[selected_pts_mask]
         new_semantic_feature = self._semantic_feature[selected_pts_mask] 
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_semantic_feature) 
+                #EndoGaussian
+        new_deformation_table = self._deformation_table[selected_pts_mask]
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_semantic_feature, new_deformation_table) 
+
+
+        #new densify function
+
+    def densify(self, max_grad, min_opacity, extent, max_screen_size):
+        grads = self.xyz_gradient_accum / self.denom
+        grads[grads.isnan()] = 0.0
+
+        self.densify_and_clone(grads, max_grad, extent)
+        self.densify_and_split(grads, max_grad, extent)
+
+    def prune(self, max_grad, min_opacity, extent, max_screen_size):
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if max_screen_size:
+            big_points_vs = self.max_radii2D > max_screen_size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        self.prune_points(prune_mask)
+        torch.cuda.empty_cache()
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
@@ -433,10 +569,75 @@ class GaussianModel:
 
         torch.cuda.empty_cache()
 
-    def add_densification_stats(self, viewspace_point_tensor, update_filter, width, height):
-        grad = viewspace_point_tensor.grad[update_filter,:2]
-        # Normalize the gradient to [-1, 1] screen size
-        grad[:, 0] *= width * 0.5
-        grad[:, 1] *= height * 0.5
-        self.xyz_gradient_accum[update_filter] += torch.norm(grad, dim=-1, keepdim=True)
-        self.denom[update_filter] += 1
+    # def add_densification_stats(self, viewspace_point_tensor, update_filter, width, height):
+    #     grad = viewspace_point_tensor.grad[update_filter,:2]
+    #     # Normalize the gradient to [-1, 1] screen size
+    #     grad[:, 0] *= width * 0.5
+    #     grad[:, 1] *= height * 0.5
+    #     self.xyz_gradient_accum[update_filter] += torch.norm(grad, dim=-1, keepdim=True)
+    #     self.denom[update_filter] += 1
+
+    def add_densification_stats(self, viewspace_point_tensor, update_filter):
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor[update_filter,:2], dim=-1, keepdim=True)
+        self.denom[update_filter] += 1  
+
+#EndoGaussian for remaining
+    @torch.no_grad()
+    def update_deformation_table(self,threshold):
+        # print("origin deformation point nums:",self._deformation_table.sum())
+        self._deformation_table = torch.gt(self._deformation_accum.max(dim=-1).values/100,threshold)
+
+    def print_deformation_weight_grad(self):
+        for name, weight in self._deformation.named_parameters():
+            if weight.requires_grad:
+                if weight.grad is None:
+                    
+                    print(name," :",weight.grad)
+                else:
+                    if weight.grad.mean() != 0:
+                        print(name," :",weight.grad.mean(), weight.grad.min(), weight.grad.max())
+        print("-"*50)
+    
+    def _plane_regulation(self):
+        multi_res_grids = self._deformation.deformation_net.grid.grids
+        total = 0
+        # model.grids is 6 x [1, rank * F_dim, reso, reso]
+        for grids in multi_res_grids:
+            if len(grids) == 3:
+                time_grids = []
+            else:
+                time_grids =  [0,1,3]
+            for grid_id in time_grids:
+                total += compute_plane_smoothness(grids[grid_id])
+        return total
+
+    def _time_regulation(self):
+        multi_res_grids = self._deformation.deformation_net.grid.grids
+        total = 0
+        # model.grids is 6 x [1, rank * F_dim, reso, reso]
+        for grids in multi_res_grids:
+            if len(grids) == 3:
+                time_grids = []
+            else:
+                time_grids =[2, 4, 5]
+            for grid_id in time_grids:
+                total += compute_plane_smoothness(grids[grid_id])
+        return total
+    
+    def _l1_regulation(self):
+                # model.grids is 6 x [1, rank * F_dim, reso, reso]
+        multi_res_grids = self._deformation.deformation_net.grid.grids
+
+        total = 0.0
+        for grids in multi_res_grids:
+            if len(grids) == 3:
+                continue
+            else:
+                # These are the spatiotemporal grids
+                spatiotemporal_grids = [2, 4, 5]
+            for grid_id in spatiotemporal_grids:
+                total += torch.abs(1 - grids[grid_id]).mean()
+        return total
+
+    def compute_regulation(self, time_smoothness_weight, l1_time_planes_weight, plane_tv_weight):
+        return plane_tv_weight * self._plane_regulation() + time_smoothness_weight * self._time_regulation() + l1_time_planes_weight * self._l1_regulation()

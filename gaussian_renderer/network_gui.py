@@ -42,7 +42,18 @@ def send_json_data(conn, data):
     # Send the actual serialized data
     conn.sendall(bytes_data)
 
-def try_connect(render_items):
+def try_connect():
+    global conn, addr, listener
+    try:
+        conn, addr = listener.accept()
+        # print(f"\nConnected by {addr}")
+        conn.settimeout(None)
+        send_json_data(conn, render_items)
+    except Exception as inst:
+        pass
+        # raise inst
+
+def try_connect_old(render_items):
     global conn, addr, listener
     try:
         conn, addr = listener.accept()

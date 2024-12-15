@@ -15,6 +15,8 @@ import json
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
+#new import from EndoGaussian
+from scene.dataset import FourDGSdataset
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
@@ -32,19 +34,26 @@ class Scene:
 
         if load_iteration:
             if load_iteration == -1:
+                print('loading from max iterations')
                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
             else:
                 self.loaded_iter = load_iteration
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
-        self.train_cameras = {}
-        self.test_cameras = {}
+#single train camera and test camera in EndoGaussian
+        # self.train_cameras = {}
+        # self.test_cameras = {}
+
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.foundation_model, args.images, args.eval) 
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path,  args.foundation_model, args.white_background, args.eval) 
+#add support for endonerf scene
+        elif os.path.exists(os.path.join(args.source_path, "poses_bounds.npy")):
+            print('Found poses_bound.npy, assuming endonerf dataset!')
+            scene_info = sceneLoadTypeCallbacks["endonerf"](args.source_path, args.white_background, args.eval)
         else:
             assert False, "Could not recognize scene type!"
 
@@ -68,26 +77,64 @@ class Scene:
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 
-        for resolution_scale in resolution_scales:
-            print("Loading Training Cameras")
-            self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
-            print("Loading Test Cameras")
-            self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+
+#no resolution scale in endogaussian
+        # for resolution_scale in resolution_scales:
+        #     print("Loading Training Cameras")
+        #     self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
+        #     print("Loading Test Cameras")
+        #     self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+
+        #instead:
+        print("Loading Training Cameras")
+        self.train_camera = FourDGSdataset(scene_info.train_cameras, args)
+        print("Loading Test Cameras")
+        self.test_camera = FourDGSdataset(scene_info.test_cameras, args)
+        print("Loading Video Cameras")
+        self.video_camera = FourDGSdataset(scene_info.video_cameras,args)
+        
+        xyz_max = scene_info.point_cloud.points.max(axis=0)
+        xyz_min = scene_info.point_cloud.points.min(axis=0)
+        self.gaussians._deformation.deformation_net.grid.set_aabb(xyz_max,xyz_min)
 
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
+            # also have to load the model for endogaussian
+            self.gaussians.load_model(os.path.join(self.model_path,
+                                                            "point_cloud",
+                                                            "iteration_" + str(self.loaded_iter),
+                                                        ))
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, scene_info.semantic_feature_dim, args.speedup) 
 
-    def save(self, iteration):
-        point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+#old save fn for feature3dgs, endogaussian takes stages as argument 
+    # def save(self, iteration):
+    #     point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+    #     self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+
+    def save(self, iteration, stage):
+        if stage == "coarse":
+            point_cloud_path = os.path.join(self.model_path, "point_cloud/coarse_iteration_{}".format(iteration))
+        else:
+            point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+        self.gaussians.save_deformation(point_cloud_path)
+
+#in feature3dgs uses scale, but not used in endogaussian
+    # def getTrainCameras(self, scale=1.0):
+    #     return self.train_cameras[scale]
+
+    # def getTestCameras(self, scale=1.0):
+    #     return self.test_cameras[scale]
 
     def getTrainCameras(self, scale=1.0):
-        return self.train_cameras[scale]
+        return self.train_camera
 
     def getTestCameras(self, scale=1.0):
-        return self.test_cameras[scale]
+        return self.test_camera
+
+    def getVideoCameras(self, scale=1.0):
+        return self.video_camera

@@ -14,10 +14,12 @@ from torch import nn
 import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 
+# new args for endogaussian: depth and mask, time
+#TODO: add semantic features back into the arguments, required for feature3dgs
 class Camera(nn.Module):
-    def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
-                 image_name, uid, semantic_feature,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda"
+    def __init__(self, colmap_id, R, T, FoVx, FoVy, image, depth, mask, gt_alpha_mask,
+                 image_name, uid,
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", time = 0,  Znear=None, Zfar=None
                  ): 
         super(Camera, self).__init__()
 
@@ -28,7 +30,9 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
-        self.semantic_feature = semantic_feature 
+        # self.semantic_feature = semantic_feature 
+        self.time = time
+        self.mask = mask
 
         try:
             self.data_device = torch.device(data_device)
@@ -38,6 +42,9 @@ class Camera(nn.Module):
             self.data_device = torch.device("cuda")
 
         self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
+
+        #depth for endogaussian
+        self.original_depth = depth
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
 
@@ -46,8 +53,15 @@ class Camera(nn.Module):
         else:
             self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
 
-        self.zfar = 100.0
-        self.znear = 0.01
+        # self.zfar = 100.0
+        # self.znear = 0.01
+
+        if Zfar is not None and Znear is not None:
+            self.zfar = Zfar
+            self.znear = Znear
+        else:
+            self.zfar = 100.0
+            self.znear = 1.0
 
         self.trans = trans
         self.scale = scale

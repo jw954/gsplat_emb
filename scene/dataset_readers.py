@@ -44,8 +44,11 @@ class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
     train_cameras: list
     test_cameras: list
+    # video cams is new for endogaussian
+    video_cameras: list
     nerf_normalization: dict
     ply_path: str
+    maxtime: int 
     semantic_feature_dim: int 
 
 def getNerfppNorm(cam_info):
@@ -296,7 +299,61 @@ def readNerfSyntheticInfo(path, foundation_model, white_background, eval, extens
                            semantic_feature_dim=semantic_feature_dim) 
     return scene_info
 
+def readEndoNeRFInfo(datadir, use_bg_points, eval):
+    # load camera infos
+    from scene.endo_loader import EndoNeRF_Dataset
+    endo_dataset = EndoNeRF_Dataset(
+        datadir=datadir,
+        downsample=1.0,
+    )
+    train_cam_infos = endo_dataset.format_infos(split="train")
+    test_cam_infos = endo_dataset.format_infos(split="test")
+    video_cam_infos = endo_dataset.format_infos(split="video")
+    # print("loaded all cam infos!")
+    
+    # get normalizations
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    # print("got nerf norms!")
+
+    # initialize sparse point clouds
+    ply_path = os.path.join(datadir, "points3d.ply")
+    xyz, rgb, normals = endo_dataset.get_sparse_pts_v2()
+    # print("got sparse points!")
+    
+    # num_pts = 23000
+    # xyz = np.random.random((num_pts, 3))
+    # shs = np.random.random((num_pts, 3)) / 255.0
+    normals = np.random.random((xyz.shape[0], 3))
+    pcd = BasicPointCloud(points=xyz, colors=rgb, normals=normals)
+    print('defining point cloud')
+    storePly(ply_path, xyz,rgb*255)
+
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+    
+    # get the maximum time
+    maxtime = endo_dataset.get_maxtime()
+    print('maxtime:' , maxtime)
+    semantic_feature_dim = 128
+    # hard coded
+    
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           video_cameras=video_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path,
+                           maxtime=maxtime,
+                           semantic_feature_dim=semantic_feature_dim)
+
+    print('got scene info!')
+
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "endonerf": readEndoNeRFInfo
 }

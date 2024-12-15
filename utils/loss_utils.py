@@ -14,8 +14,34 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
 
-def l1_loss(network_output, gt):
-    return torch.abs((network_output - gt)).mean()
+#feature3dgs
+# def l1_loss(network_output, gt):
+#     return torch.abs((network_output - gt)).mean()
+
+#endogaussian losses
+def lpips_loss(img1, img2, lpips_model):
+    loss = lpips_model(img1,img2)
+    return loss.mean()
+
+def l1_loss(network_output, gt, mask=None):
+    loss = torch.abs((network_output - gt))
+    if mask is not None:
+        if mask.ndim == 4:
+            mask = mask.repeat(1, network_output.shape[1], 1, 1)
+        elif mask.ndim == 3:
+            mask = mask.repeat(network_output.shape[1], 1, 1)
+        else:
+            raise ValueError('the dimension of mask should be either 3 or 4')
+    
+        try:
+            loss = loss[mask!=0]
+        except:
+            print(loss.shape)
+            print(mask.shape)
+            print(loss.dtype)
+            print(mask.dtype)
+    return loss.mean()
+#########
 
 def l2_loss(network_output, gt):
     return ((network_output - gt) ** 2).mean()

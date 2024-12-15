@@ -71,6 +71,34 @@ class PipelineParams(ParamGroup):
         self.debug = True
         super().__init__(parser, "Pipeline Parameters")
 
+#endogaussan?
+class ModelHiddenParams(ParamGroup):
+    def __init__(self, parser):
+        self.net_width = 64
+        self.timebase_pe = 4
+        self.defor_depth = 1
+        self.posebase_pe = 10
+        self.scale_rotation_pe = 2
+        self.opacity_pe = 2
+        self.timenet_width = 64
+        self.timenet_output = 32
+        self.bounds = 1.6
+        self.plane_tv_weight = 0.0001
+        self.time_smoothness_weight = 0.01
+        self.l1_time_planes = 0.0001
+        self.kplanes_config = {
+                             'grid_dimensions': 2,
+                             'input_coordinate_dim': 4,
+                             'output_coordinate_dim': 32,
+                             'resolution': [64, 64, 64, 25]
+                            }
+        self.multires = [1, 2, 4, 8]
+        self.no_grid=False
+        self.no_ds=False
+        self.no_dr=False
+        self.no_do=True
+        super().__init__(parser, "ModelHiddenParams")
+
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
@@ -78,6 +106,13 @@ class OptimizationParams(ParamGroup):
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
+#endogaussian 
+        self.deformation_lr_init = 0.00016
+        self.deformation_lr_final = 0.000016
+        self.deformation_lr_delay_mult = 0.01
+        self.grid_lr_init = 0.0016
+        self.grid_lr_final = 0.00016
+
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
