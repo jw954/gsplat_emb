@@ -32,6 +32,9 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = gaussians
 
+        print('model save path is:', args.model_path)
+        print('dataset source path is:' , args.source_path)
+
         if load_iteration:
             if load_iteration == -1:
                 print('loading from max iterations')

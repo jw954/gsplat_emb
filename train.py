@@ -11,7 +11,7 @@
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim, tv_loss 
+from utils.loss_utils import l1_loss, ssim, tv_loss, lpips_loss 
 from gaussian_renderer import gsplat_render as gsplat_render, network_gui
 from gaussian_renderer import render as render
 import sys
@@ -44,10 +44,11 @@ from utils.scene_utils import render_training_image
 import lpips
 import cv2
 
-def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, extra_mark):
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset)
+    tb_writer = prepare_output_and_logger(expname)
     gaussians = GaussianModel(dataset, dataset.sh_degree, hyper)
+    dataset.model_path = args.model_path
     print('initalized gaussian model!')
     scene = Scene(dataset, gaussians)
     timer = Timer()
@@ -208,6 +209,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     print('using device:',  device)
 
     print('saving iterations:' , saving_iterations)
+    print('iters until densify:', opt.densify_until_iter)
 
     first_iter = 0
     gaussians.training_setup(opt)
@@ -231,23 +233,24 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     first_iter += 1
     #vgg net used to compute some perceptual loss function, not trained during training routine
     lpips_model = lpips.LPIPS(net="vgg").cuda()
-    video_cams = scene.getVideoCameras()
+    # video_cams = scene.getVideoCameras()
     
     for iteration in range(first_iter, final_iter+1):        
-        if network_gui.conn == None:
-            network_gui.try_connect()
-        while network_gui.conn != None:
-            try:
-                net_image_bytes = None
-                custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer, ts = network_gui.receive()
-                if custom_cam != None:
-                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer, stage="stage")["render"]
-                    net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
-                network_gui.send(net_image_bytes, dataset.source_path)
-                if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
-                    break
-            except Exception as e:
-                network_gui.conn = None
+        # if network_gui.conn == None:
+        #     network_gui.try_connect()
+        # while network_gui.conn != None:
+        #     try:
+        #         print('connected to network GUI')
+        #         net_image_bytes = None
+        #         custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer, ts = network_gui.receive()
+        #         if custom_cam != None:
+        #             net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer, stage="stage")["render"]
+        #             net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
+        #         network_gui.send(net_image_bytes, dataset.source_path)
+        #         if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
+        #             break
+        #     except Exception as e:
+        #         network_gui.conn = None
 
         iter_start.record()
         gaussians.update_learning_rate(iteration)
@@ -354,9 +357,9 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         if opt.lambda_dssim != 0:
             ssim_loss = ssim(image_tensor,gt_image_tensor)
             loss += opt.lambda_dssim * (1.0-ssim_loss)
-        # if opt.lambda_lpips !=0:
-        #     lpipsloss = lpips_loss(image_tensor,gt_image_tensor,lpips_model)
-        #     loss += opt.lambda_lpips * lpipsloss
+        if opt.lambda_lpips !=0:
+            lpipsloss = lpips_loss(image_tensor,gt_image_tensor,lpips_model)
+            loss += opt.lambda_lpips * lpipsloss
         
         loss.backward()
         viewspace_point_tensor_grad = torch.zeros_like(viewspace_point_tensor)
@@ -399,40 +402,32 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             if iteration < opt.densify_until_iter :
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                
-                #add densification stats is different for endogaussin
-                # gaussians.add_densification_stats(viewspace_point_tensor_grad, visibility_filter)
+                gaussians.add_densification_stats(viewspace_point_tensor_grad, visibility_filter)
 
                 if stage == "coarse":
-                    #hard code these
-                    opacity_threshold = 0.005
-                    # opacity_threshold = opt.opacity_threshold_coarse
-                    densify_threshold = 0.0002 
-                    # densify_threshold = opt.densify_grad_threshold_coarse
+                    opacity_threshold = opt.opacity_threshold_coarse
+                    densify_threshold = opt.densify_grad_threshold_coarse
                 else:  
-                    #hard code these
-                    opacity_threshold = 0.005
-                    densify_threshold = 0.0002 
-                    # opacity_threshold = opt.opacity_threshold_fine_init - iteration*(opt.opacity_threshold_fine_init - opt.opacity_threshold_fine_after)/(opt.densify_until_iter)  
-                    # densify_threshold = opt.densify_grad_threshold_fine_init - iteration*(opt.densify_grad_threshold_fine_init - opt.densify_grad_threshold_after)/(opt.densify_until_iter )  
+                    opacity_threshold = opt.opacity_threshold_fine_init - iteration*(opt.opacity_threshold_fine_init - opt.opacity_threshold_fine_after)/(opt.densify_until_iter)  
+                    densify_threshold = opt.densify_grad_threshold_fine_init - iteration*(opt.densify_grad_threshold_fine_init - opt.densify_grad_threshold_after)/(opt.densify_until_iter )  
 
-                # if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 :
-                #     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                #     gaussians.densify(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
-
-                if iteration > 500 and iteration % 100 == 0 :
-                    size_threshold = 20 if iteration > 3000 else None
+                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 :
+                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
-                    
-                # if iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0:
-                #     size_threshold = 40 if iteration > opt.opacity_reset_interval else None
-                #     gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
 
-                if iteration > 500 and iteration % 100 == 0:
-                    size_threshold = 40 if iteration > 3000 else None
-                    gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
+#hardcoded
+                # if iteration > 500 and iteration % 100 == 0 :
+                #     size_threshold = 20 if iteration > 3000 else None
+                #     gaussians.densify(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
                     
-                if iteration % 3000 == 0:
+                if iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0:
+                    size_threshold = 40 if iteration > opt.opacity_reset_interval else None
+                    gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
+
+                # if iteration > 500 and iteration % 100 == 0:
+                #     size_threshold = 40 if iteration > 3000 else None
+                #     gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
+                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     print("reset opacity")
                     gaussians.reset_opacity()
                     
@@ -445,20 +440,38 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
-def prepare_output_and_logger(args):    
-    if not args.model_path:
-        if os.getenv('OAR_JOB_ID'):
-            unique_str=os.getenv('OAR_JOB_ID')
-        else:
-            unique_str = str(uuid.uuid4())
-        args.model_path = os.path.join("./output/", unique_str[0:10])
+#feature3dgs
+# def prepare_output_and_logger(args):    
+#     if not args.model_path:
+#         if os.getenv('OAR_JOB_ID'):
+#             unique_str=os.getenv('OAR_JOB_ID')
+#         else:
+#             unique_str = str(uuid.uuid4())
+#         args.model_path = os.path.join("./output/", unique_str[0:10])
         
+#     # Set up output folder
+#     print("Output folder: {}".format(args.model_path))
+#     os.makedirs(args.model_path, exist_ok = True)
+#     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+#         cfg_log_f.write(str(Namespace(**vars(args))))
+
+#     # Create Tensorboard writer
+#     tb_writer = None
+#     if TENSORBOARD_FOUND:
+#         tb_writer = SummaryWriter(args.model_path)
+#     else:
+#         print("Tensorboard not available: not logging progress")
+#     return tb_writer
+
+def prepare_output_and_logger(expname):    
+    if not args.model_path:
+        unique_str = expname
+        args.model_path = os.path.join("./output/", unique_str)
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
     os.makedirs(args.model_path, exist_ok = True)
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
-
     # Create Tensorboard writer
     tb_writer = None
     if TENSORBOARD_FOUND:
@@ -466,6 +479,7 @@ def prepare_output_and_logger(args):
     else:
         print("Tensorboard not available: not logging progress")
     return tb_writer
+
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, stage):
     if tb_writer:
@@ -524,13 +538,26 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    # old params for feature3dgs
+    # parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    # parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    # endogaussian
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[i*500 for i in range(0,120)])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1000, 3000, 5000, 7_000, 9000, 10000, 14000, 20000, 30_000,45000,60000])
+    parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--expname", type=str, default = "")
+    parser.add_argument("--configs", type=str, default = "")
+    ####
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
-    parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
+
+    if args.configs:
+        import mmcv
+        from utils.params_utils import merge_hparams
+        config = mmcv.Config.fromfile(args.configs)
+        args = merge_hparams(args, config)
     
     print("Optimizing " + args.model_path)
     dataset = lp.extract(args)
@@ -542,7 +569,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(dataset, hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(dataset, hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.extra_mark)
 
     # All done
     print("\nTraining complete.")

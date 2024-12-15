@@ -179,11 +179,11 @@ if __name__ == "__main__":
     parser.add_argument("--configs", type=str)
     args = get_combined_args(parser)
     print("Rendering ", args.model_path)
-    # if args.configs:
-    #     import mmcv
-    #     from utils.params_utils import merge_hparams
-    #     config = mmcv.Config.fromfile(args.configs)
-    #     args = merge_hparams(args, config)
+    if args.configs:
+        import mmcv
+        from utils.params_utils import merge_hparams
+        config = mmcv.Config.fromfile(args.configs)
+        args = merge_hparams(args, config)
     # Initialize system state (RNG)
     safe_state(args.quiet)
     render_sets(model.extract(args), hyperparam.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.skip_video)

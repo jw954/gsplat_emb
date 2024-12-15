@@ -55,6 +55,14 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
+        #endogaussian
+        self.render_process=False
+        self.extra_mark=None
+        self.camera_extent=None
+        self.mode='binocular'
+        self.no_fine=False
+        self.init_pts=200_000
+        ########
         self.speedup = False ###
         self.render_items = ['RGB', 'Depth', 'Edge', 'Normal', 'Curvature', 'Feature Map']
         super().__init__(parser, "Loading Parameters", sentinel)
@@ -68,7 +76,7 @@ class PipelineParams(ParamGroup):
     def __init__(self, parser):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
-        self.debug = True
+        self.debug = False
         super().__init__(parser, "Pipeline Parameters")
 
 #endogaussan?
@@ -101,11 +109,21 @@ class ModelHiddenParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
+
+        #EndoGaussian
+        self.data_loader = False
+        self.coarse_iterations = 3000
+
+
         self.iterations = 30_000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
+        #feature3dgs 
         self.position_lr_max_steps = 30_000
+#endogaussian
+        self.position_lr_max_steps = 20_000
+
 #endogaussian 
         self.deformation_lr_init = 0.00016
         self.deformation_lr_final = 0.000016
@@ -121,11 +139,30 @@ class OptimizationParams(ParamGroup):
         self.semantic_feature_lr = 0.001 
 #################################################
         self.percent_dense = 0.01
-        self.lambda_dssim = 0.2
+        #endogaussian
+        self.lambda_dssim = 0
+        self.lambda_lpips = 0
+        #feature3dgs
+        # self.lambda_dssim = 0.2
+
+#more endogaussian parameters
+        self.weight_constraint_init= 1
+        self.weight_constraint_after = 0.2
+        self.weight_decay_iteration = 5000
+        self.densify_grad_threshold_coarse = 0.0002
+        self.densify_grad_threshold_fine_init = 0.0002
+        self.densify_grad_threshold_after = 0.0002
+        self.pruning_from_iter = 500
+        self.pruning_interval = 100
+        self.opacity_threshold_coarse = 0.005
+        self.opacity_threshold_fine_init = 0.005
+        self.opacity_threshold_fine_after = 0.005
+#######
+
         self.densification_interval = 100
         self.opacity_reset_interval = 3000 ### TRY reset to 100000 but worse
         self.densify_from_iter = 500
-        self.densify_until_iter = 15_000 #6000 ### comapre with 2-stage
+        self.densify_until_iter = 15000 #6000 ### comapre with 2-stage
         self.densify_grad_threshold = 0.0002
         super().__init__(parser, "Optimization Parameters")
 

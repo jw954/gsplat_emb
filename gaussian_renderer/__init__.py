@@ -225,7 +225,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         rotations = pc._rotation
     deformation_point = pc._deformation_table
 
-    print('deformation points:', deformation_point)
+    # print('deformation points:', deformation_point)
     
     if stage == "coarse" :
         means3D_deform, scales_deform, rotations_deform, opacity_deform = means3D, scales, rotations, opacity
