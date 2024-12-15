@@ -1,1 +1,0 @@
-Namespace(sh_degree=3, source_path='/mnt/data2/kai/pulling_soft_tissues', foundation_model='sam', model_path='./tissues_output', images='images', resolution=-1, white_background=False, data_device='cuda:0', eval=False, speedup=True, render_items=['RGB', 'Depth', 'Edge', 'Normal', 'Curvature', 'Feature Map'])
